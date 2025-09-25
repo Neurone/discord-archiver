@@ -25,13 +25,20 @@ import path from "path";
 
 // -------------------- CONFIGURATION --------------------
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;               // keep secret!
-const CHANNEL_ID = "1420818641104015532";               // <-- change to yours
+const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || process.argv[2];  // from env var or CLI arg
 const OUTPUT_ROOT = "./discord_archive";               // where markdown lands
 const CHECKPOINT_PATH = "./checkpoint.json";           // tiny JSON file
 // ---------------------------------------------------------
 
 if (!DISCORD_TOKEN) {
   console.error("❌ Please set the DISCORD_TOKEN environment variable.");
+  process.exit(1);
+}
+
+if (!CHANNEL_ID) {
+  console.error("❌ Please provide a CHANNEL_ID either via:");
+  console.error("   • Environment variable: DISCORD_CHANNEL_ID=your_channel_id");
+  console.error("   • Command line argument: node discord-archiver.js your_channel_id");
   process.exit(1);
 }
 
