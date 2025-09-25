@@ -1,0 +1,16 @@
+{
+  "name": "discord-archiver",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "discord-archiver.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@dotenvx/dotenvx": "github:dotenvx/dotenvx",
+    "discord.js": "^14.22.1"
+  }
+}
