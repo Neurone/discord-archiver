@@ -23,21 +23,21 @@ import { promises as fs } from "fs";
 import path from "path";
 
 // -------------------- CONFIGURATION --------------------
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;               // keep secret!
-const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || process.argv[2];  // from env var or CLI arg
-const OUTPUT_ROOT = "./discord_archive";               // where markdown lands
-const CHECKPOINT_PATH = "./checkpoint.json";           // tiny JSON file
+const CHANNEL_ID = process.env.CHANNEL_ID || process.argv[2];   // from env var or CLI arg
+const API_TOKEN = process.env.API_TOKEN;                        // keep secret!
+const OUTPUT_ROOT = "./discord_archive";                        // where markdown lands
+const CHECKPOINT_PATH = "./discord_archive/checkpoints.json";   // tiny JSON file
 const FILTER_TAGS = process.env.FILTER_TAGS ? process.env.FILTER_TAGS.split(',').map(tag => tag.trim().toLowerCase()) : []; // comma-separated tags to filter
 // ---------------------------------------------------------
 
-if (!DISCORD_TOKEN) {
-  console.error("❌ Please set the DISCORD_TOKEN environment variable.");
+if (!API_TOKEN) {
+  console.error("❌ Please set the API_TOKEN environment variable.");
   process.exit(1);
 }
 
-if (!DISCORD_CHANNEL_ID) {
-  console.error("❌ Please provide a DISCORD_CHANNEL_ID either via:");
-  console.error("   • Environment variable: DISCORD_CHANNEL_ID=your_channel_id");
+if (!CHANNEL_ID) {
+  console.error("❌ Please provide a CHANNEL_ID either via:");
+  console.error("   • Environment variable: CHANNEL_ID=your_channel_id");
   console.error("   • Command line argument: node discord-archiver.js your_channel_id");
   process.exit(1);
 }
@@ -100,7 +100,7 @@ async function writeMessageWithoutCheckpoint(msg, channelContext = null) {
   // Determine the appropriate file based on channel/thread ID
   let channelId;
   let channelName;
-  
+
   if (channelContext && channelContext.isThread && channelContext.isThread()) {
     // Use thread ID for thread messages
     channelId = channelContext.id;
@@ -112,22 +112,22 @@ async function writeMessageWithoutCheckpoint(msg, channelContext = null) {
   }
 
   await fs.mkdir(OUTPUT_ROOT, { recursive: true });
-  
+
   // Create filename with just the numeric channel/thread ID
   const fileName = `${channelId}.md`;
   const filePath = path.join(OUTPUT_ROOT, fileName);
-  
+
   // Check if message already exists in the file to prevent duplicates
   let fileExists = false;
   let fileContent = "";
   try {
     fileContent = await fs.readFile(filePath, "utf8");
     fileExists = true;
-    
+
     // Check if this exact message content and timestamp already exists
     const messageTimestamp = msg.createdAt.toISOString().replace("T", " ").replace("Z", " UTC");
     const escapedContent = msg.content.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    
+
     if (fileContent.includes(messageTimestamp) && fileContent.includes(msg.content)) {
       // Message already exists, skip writing
       console.log(`⏭️ Skipping duplicate message ID ${msg.id}: ${msg.content.substring(0, 50)}...`);
@@ -136,12 +136,12 @@ async function writeMessageWithoutCheckpoint(msg, channelContext = null) {
   } catch {
     // File doesn't exist, we'll create it with header
   }
-  
+
   let content = "";
   if (!fileExists) {
     content += `# ${channelName}\n\n`;
   }
-  
+
   const md = messageToMarkdown(msg, channelContext) + "\n\n---\n\n";
   content += md;
 
@@ -156,18 +156,18 @@ function hasMatchingTag(thread) {
     // No filter tags specified, include all threads
     return true;
   }
-  
+
   if (!thread.appliedTags || thread.appliedTags.length === 0) {
     // Thread has no tags
     return false;
   }
-  
+
   // Get the forum channel to access tag names
   const forumChannel = thread.parent;
   if (!forumChannel || !forumChannel.availableTags) {
     return false;
   }
-  
+
   // Convert thread tag IDs to tag names
   const threadTagNames = thread.appliedTags
     .map(tagId => {
@@ -175,9 +175,9 @@ function hasMatchingTag(thread) {
       return tag ? tag.name.toLowerCase() : null;
     })
     .filter(name => name !== null);
-  
+
   // Check if any thread tag matches any filter tag (case insensitive)
-  return threadTagNames.some(tagName => 
+  return threadTagNames.some(tagName =>
     FILTER_TAGS.some(filterTag => tagName.includes(filterTag) || filterTag.includes(tagName))
   );
 }
@@ -187,23 +187,23 @@ function hasMatchingTag(thread) {
 // ------------------------------------------------------------------
 async function getAllThreads(forumChannel) {
   const threads = [];
-  
+
   // Get active threads
   const activeThreads = await forumChannel.threads.fetchActive();
   threads.push(...activeThreads.threads.values());
-  
+
   // Get archived threads (both public and private)
   const archivedThreads = await forumChannel.threads.fetchArchived();
   threads.push(...archivedThreads.threads.values());
-  
+
   // Filter threads by tags if specified
   const filteredThreads = threads.filter(thread => hasMatchingTag(thread));
-  
+
   if (FILTER_TAGS.length > 0) {
     console.log(`🏷️ Filtering by tags: ${FILTER_TAGS.join(', ')}`);
     console.log(`📊 Found ${filteredThreads.length}/${threads.length} threads matching filter criteria`);
   }
-  
+
   return filteredThreads;
 }
 
@@ -218,7 +218,7 @@ async function bulkExport(channel) {
     // Handle forum channel - export all threads
     const threads = await getAllThreads(channel);
     console.log(`📚 Found ${threads.length} threads in forum channel`);
-    
+
     for (const thread of threads) {
       const threadCheckpoint = getChannelCheckpoint(checkpoints, thread.id);
       console.log(`📝 Exporting thread: ${thread.name} (checkpoint: ${threadCheckpoint ?? "none"})`);
@@ -242,7 +242,7 @@ async function exportChannelMessages(channel, checkpoint) {
   let options = {
     limit: 100, // max per request
   };
-  
+
   // Only add 'after' if we have a checkpoint - this fetches messages AFTER the checkpoint
   if (checkpoint) {
     options.after = checkpoint;
@@ -252,7 +252,7 @@ async function exportChannelMessages(channel, checkpoint) {
   let processedCount = 0;
   let latestMessageId = checkpoint; // Track the latest message ID for checkpoint updating
   let done = false;
-  
+
   while (!done) {
     const fetched = await channel.messages.fetch(options);
     if (fetched.size === 0) {
@@ -267,22 +267,22 @@ async function exportChannelMessages(channel, checkpoint) {
     for (const msg of msgs) {
       // Skip bot messages if you don't want them
       if (msg.author.bot) continue;
-      
+
       // Skip if message is older than or equal to checkpoint (safety check)
       if (checkpoint && msg.id <= checkpoint) {
         continue;
       }
-      
+
       console.log(`🔄 Processing message ${msg.id}`);
-      
+
       // Write message without updating checkpoint yet
       await writeMessageWithoutCheckpoint(msg, channel);
-      
+
       // Track the latest message ID
       if (!latestMessageId || msg.id > latestMessageId) {
         latestMessageId = msg.id;
       }
-      
+
       processedCount++;
       batchProcessedCount++;
     }
@@ -296,7 +296,7 @@ async function exportChannelMessages(channel, checkpoint) {
     // Since we're using 'after', we only get messages newer than checkpoint
     done = true;
   }
-  
+
   if (processedCount === 0 && checkpoint) {
     console.log(`✅ No new messages found for channel ${channel.id}`);
   } else {
@@ -319,7 +319,7 @@ const client = new Client({
 client.once("ready", async () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
 
-  const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
+  const channel = await client.channels.fetch(CHANNEL_ID);
   if (!channel || (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildForum)) {
     console.error("❌ Target channel not found or not a text/forum channel.");
     process.exit(1);
@@ -335,22 +335,22 @@ client.once("ready", async () => {
 client.on("messageCreate", async (msg) => {
   // Guard: ignore messages from bots (including ourselves) unless you want them
   if (msg.author.bot) return;
-  
+
   // Check if message is from our target channel or a thread within our forum channel
   let isFromTargetChannel = false;
-  if (msg.channel.id === DISCORD_CHANNEL_ID) {
+  if (msg.channel.id === CHANNEL_ID) {
     // Direct message in the target channel
     isFromTargetChannel = true;
   } else if (msg.channel.isThread && msg.channel.isThread()) {
     // Message in a thread - check if the parent is our target forum channel
-    if (msg.channel.parent && msg.channel.parent.id === DISCORD_CHANNEL_ID) {
+    if (msg.channel.parent && msg.channel.parent.id === CHANNEL_ID) {
       // Also check if the thread has matching tags
       if (hasMatchingTag(msg.channel)) {
         isFromTargetChannel = true;
       }
     }
   }
-  
+
   if (!isFromTargetChannel) return;
 
   // For real-time messages, write and update checkpoint immediately
@@ -361,7 +361,7 @@ client.on("messageCreate", async (msg) => {
 // ------------------------------------------------------------------
 // Start the bot
 // ------------------------------------------------------------------
-client.login(DISCORD_TOKEN).catch((err) => {
+client.login(API_TOKEN).catch((err) => {
   console.error("❌ Failed to login:", err);
   process.exit(1);
 });
