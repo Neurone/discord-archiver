@@ -25,7 +25,7 @@ import path from "path";
 
 // -------------------- CONFIGURATION --------------------
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;               // keep secret!
-const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || process.argv[2];  // from env var or CLI arg
+const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || process.argv[2];  // from env var or CLI arg
 const OUTPUT_ROOT = "./discord_archive";               // where markdown lands
 const CHECKPOINT_PATH = "./checkpoint.json";           // tiny JSON file
 // ---------------------------------------------------------
@@ -35,8 +35,8 @@ if (!DISCORD_TOKEN) {
   process.exit(1);
 }
 
-if (!CHANNEL_ID) {
-  console.error("❌ Please provide a CHANNEL_ID either via:");
+if (!DISCORD_CHANNEL_ID) {
+  console.error("❌ Please provide a DISCORD_CHANNEL_ID either via:");
   console.error("   • Environment variable: DISCORD_CHANNEL_ID=your_channel_id");
   console.error("   • Command line argument: node discord-archiver.js your_channel_id");
   process.exit(1);
@@ -86,7 +86,7 @@ function messageToMarkdown(msg) {
 // ------------------------------------------------------------------
 // Write a single message to the appropriate daily file
 // ------------------------------------------------------------------
-async function writeMessage(msg) {
+async function writeMessage(msg, channelContext = null) {
   const d = msg.createdAt; // Date object (already in local timezone)
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, "0"); // months are 0‑based
@@ -96,10 +96,27 @@ async function writeMessage(msg) {
   await fs.mkdir(dir, { recursive: true });
 
   const filePath = path.join(dir, `${day}.md`);
-  const md = messageToMarkdown(msg) + "\n\n---\n\n";
+  const md = messageToMarkdown(msg, channelContext) + "\n\n---\n\n";
 
   await fs.appendFile(filePath, md, "utf8");
   await saveCheckpoint(msg.id); // persist after successful write
+}
+
+// ------------------------------------------------------------------
+// Helper: get all threads from a forum channel
+// ------------------------------------------------------------------
+async function getAllThreads(forumChannel) {
+  const threads = [];
+  
+  // Get active threads
+  const activeThreads = await forumChannel.threads.fetchActive();
+  threads.push(...activeThreads.threads.values());
+  
+  // Get archived threads (both public and private)
+  const archivedThreads = await forumChannel.threads.fetchArchived();
+  threads.push(...archivedThreads.threads.values());
+  
+  return threads;
 }
 
 // ------------------------------------------------------------------
@@ -109,16 +126,32 @@ async function bulkExport(channel) {
   const checkpoint = await loadCheckpoint();
   console.log(`🔎 Starting bulk export. Checkpoint = ${checkpoint ?? "none"}`);
 
-  // Discord's fetchMessages returns newest → oldest by default.
-  // We want oldest first, so we set `after` to the checkpoint (if any)
-  // and iterate with `fetchMessages` + `reverse`.
+  if (channel.type === ChannelType.GuildForum) {
+    // Handle forum channel - export all threads
+    const threads = await getAllThreads(channel);
+    console.log(`📚 Found ${threads.length} threads in forum channel`);
+    
+    for (const thread of threads) {
+      console.log(`📝 Exporting thread: ${thread.name}`);
+      await exportChannelMessages(thread, checkpoint);
+    }
+  } else {
+    // Handle regular text channel
+    await exportChannelMessages(channel, checkpoint);
+  }
+
+  console.log("✅ Bulk export completed.");
+}
+
+// ------------------------------------------------------------------
+// Export messages from a specific channel or thread
+// ------------------------------------------------------------------
+async function exportChannelMessages(channel, checkpoint) {
   let options = {
     limit: 100, // max per request
     after: checkpoint ? SnowflakeUtil.deconstruct(checkpoint).timestamp : undefined,
   };
 
-  // The `channel.messages.fetch` method returns a Collection.
-  // We'll keep fetching until we get fewer than 100 messages (end of history).
   let done = false;
   while (!done) {
     const fetched = await channel.messages.fetch(options);
@@ -133,7 +166,7 @@ async function bulkExport(channel) {
     for (const msg of msgs) {
       // Skip bot messages if you don't want them
       if (msg.author.bot) continue;
-      await writeMessage(msg);
+      await writeMessage(msg, channel);
     }
 
     // Prepare the next page: the oldest ID we just processed becomes the new "after"
@@ -142,8 +175,6 @@ async function bulkExport(channel) {
     // Small pause to stay well under Discord's rate limits
     await new Promise((r) => setTimeout(r, 300));
   }
-
-  console.log("✅ Bulk export completed.");
 }
 
 // ------------------------------------------------------------------
@@ -161,9 +192,9 @@ const client = new Client({
 client.once("ready", async () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
 
-  const channel = await client.channels.fetch(CHANNEL_ID);
-  if (!channel || channel.type !== ChannelType.GuildText) {
-    console.error("❌ Target channel not found or not a text channel.");
+  const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
+  if (!channel || (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildForum)) {
+    console.error("❌ Target channel not found or not a text/forum channel.");
     process.exit(1);
   }
 
@@ -177,9 +208,22 @@ client.once("ready", async () => {
 client.on("messageCreate", async (msg) => {
   // Guard: ignore messages from bots (including ourselves) unless you want them
   if (msg.author.bot) return;
-  if (msg.channel.id !== CHANNEL_ID) return; // only the channel we care about
+  
+  // Check if message is from our target channel or a thread within our forum channel
+  let isFromTargetChannel = false;
+  if (msg.channel.id === DISCORD_CHANNEL_ID) {
+    // Direct message in the target channel
+    isFromTargetChannel = true;
+  } else if (msg.channel.isThread && msg.channel.isThread()) {
+    // Message in a thread - check if the parent is our target forum channel
+    if (msg.channel.parent && msg.channel.parent.id === DISCORD_CHANNEL_ID) {
+      isFromTargetChannel = true;
+    }
+  }
+  
+  if (!isFromTargetChannel) return;
 
-  await writeMessage(msg);
+  await writeMessage(msg, msg.channel);
 });
 
 // ------------------------------------------------------------------
