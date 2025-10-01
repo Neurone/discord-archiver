@@ -2,8 +2,8 @@
   "name": "discord-archiver",
   "version": "1.0.0",
   "description": "",
-  "license": "ISC",
-  "author": "",
+  "license": "MIT",
+  "author": "Giuseppe Bertone <giuseppe.bertone@proton.me>",
   "type": "module",
   "main": "discord-archiver.js",
   "scripts": {
