@@ -1,5 +1,5 @@
 node_modules
-discord_archive
+archive
 
 .env.keys
 checkpoint.json

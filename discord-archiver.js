@@ -1,13 +1,4 @@
 #!/usr/bin/env node
-/*  Discord Archiver
- *  What it does:
- *   • On start‑up, loads a checkpoint (last saved message ID).
- *   • Pulls every message newer than that checkpoint (or the whole history)
- *     and writes it to YYYY/MM/DD.md files.
- *   • Afterwards stays online and appends each new message as it arrives.
- *
- *  Configuration – edit the constants below.
- */
 
 import dotenvx from '@dotenvx/dotenvx';
 dotenvx.config()
@@ -17,7 +8,6 @@ import {
   GatewayIntentBits,
   Partials,
   ChannelType,
-  SnowflakeUtil,
 } from "discord.js";
 import { promises as fs } from "fs";
 import path from "path";
@@ -25,8 +15,8 @@ import path from "path";
 // -------------------- CONFIGURATION --------------------
 const CHANNEL_ID = process.env.CHANNEL_ID || process.argv[2];   // from env var or CLI arg
 const API_TOKEN = process.env.API_TOKEN;                        // keep secret!
-const OUTPUT_ROOT = "./discord_archive";                        // where markdown lands
-const CHECKPOINT_PATH = "./discord_archive/checkpoints.json";   // tiny JSON file
+const OUTPUT_ROOT = "./archive";                        // where markdown lands
+const CHECKPOINT_PATH = "./archive/checkpoints.json";   // tiny JSON file
 const FILTER_TAGS = process.env.FILTER_TAGS ? process.env.FILTER_TAGS.split(',').map(tag => tag.trim().toLowerCase()) : []; // comma-separated tags to filter
 // ---------------------------------------------------------
 
@@ -353,7 +343,26 @@ client.on("messageCreate", async (msg) => {
 
   if (!isFromTargetChannel) return;
 
-  // For real-time messages, write and update checkpoint immediately
+  // Check if this is a new thread or if we need to catch up on missed messages
+  const checkpoints = await loadCheckpoints();
+  const checkpoint = checkpoints[msg.channel.id];
+
+  if (!checkpoint) {
+    // This is a new thread - fetch all historical messages first
+    console.log(`📥 New thread detected: ${msg.channel.name || msg.channel.id} - fetching historical messages...`);
+    await exportChannelMessages(msg.channel);
+    return; // exportChannelMessages already saved the checkpoint
+  }
+
+  // Check if there are missed messages (e.g., tag was removed and re-added)
+  if (msg.id > checkpoint) {
+    // Fetch all messages since the last checkpoint to catch any missed ones
+    console.log(`🔄 Catching up on missed messages for: ${msg.channel.name || msg.channel.id}`);
+    await exportChannelMessages(msg.channel, checkpoint);
+    return; // exportChannelMessages already saved the checkpoint
+  }
+
+  // For real-time messages that are already up to date, write and update checkpoint immediately
   await writeMessageWithoutCheckpoint(msg, msg.channel);
   await saveCheckpoint(msg.channel.id, msg.id);
 });

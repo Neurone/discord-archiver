@@ -8,7 +8,7 @@
   "main": "discord-archiver.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "clean": "rm discord_archive/*.md; rm discord_archive/checkpoints.json"
+    "clean": "rm archive/*.md; rm archive/checkpoints.json"
   },
   "dependencies": {
     "@dotenvx/dotenvx": "github:dotenvx/dotenvx",
