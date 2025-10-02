@@ -1,5 +1,4 @@
-node_modules
-archive
-
+.DS_Store
+node_modules/
+archive/
 .env.keys
-checkpoint.json
