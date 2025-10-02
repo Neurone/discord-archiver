@@ -70,7 +70,7 @@ Notes:
 ## Real-Time Behavior
 
 1. On startup: performs a backfill (only messages newer than the last checkpoint if it exists).
-2. While running: listens for `messageCreate`, `messageUpdate`, and `messageDelete`.
+2. While running: listens for `messageCreate`, `messageUpdate`, `messageDelete`, and `threadUpdate`.
 3. Edits: in-place rewrite with updated edit timestamp; no historical versions retained.
 4. Deletes: message block removed; any existing references rewritten to a deleted marker.
 5. Replies to already-deleted parents (even if deleted before startup) are detected and marked.

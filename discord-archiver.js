@@ -227,7 +227,7 @@ client.once("clientReady", async () => {
   // Run the one‑time back‑fill (skipping anything already saved)
   await bulkExport(channel);
 
-  // Listen for messageCreate, messageUpdate, and messageDelete
+  // Listen for messageCreate, messageUpdate, messageDelete, and threadUpdate
   console.log("👂 Listening for new messages…");
 });
 
