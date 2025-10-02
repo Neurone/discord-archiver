@@ -1,6 +1,6 @@
 # Discord Archiver
 
-Archive Discord channel messages locally. Automatically downloads message history and monitors for new messages in real-time.
+Archive Discord channel messages locally. Automatically downloads message history and monitors for new changes in real-time.
 
 ## Quickstart
 
