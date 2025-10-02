@@ -9,7 +9,7 @@ git clone https://github.com/neurone/discord-archiver.git
 cd discord-archiver
 npm install
 npx dotenvx set API_TOKEN "<YOUR_DISCORD_BOT_TOKEN>"
-npx dotenvx run -- node discord-archiver.js <CHANNEL_ID>
+npm start <CHANNEL_ID>
 ```
 
 Archives are saved as Markdown files in the `archive/` directory.

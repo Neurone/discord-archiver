@@ -13,7 +13,7 @@ import path from "path";
 
 // -------------------- CONFIGURATION --------------------
 const API_TOKEN = process.env.API_TOKEN;                                              // keep secret!
-const CHANNEL_ID = process.env.CHANNEL_ID || process.argv[2];                         // from env var or CLI arg
+const CHANNEL_ID = process.argv[2] || process.env.CHANNEL_ID;                         // from CLI arg or env var or exit
 const MAX_FETCH_SIZE = process.env.MAX_FETCH_SIZE || 100;                             // max allowed by Discord API
 const OUTPUT_ROOT = process.env.OUTPUT_ROOT || "./archive";                           // where markdown lands
 const CHECKPOINT_PATH = process.env.CHECKPOINT_PATH || "./archive/checkpoints.json";  // tiny JSON file
@@ -27,8 +27,8 @@ if (!API_TOKEN) {
 
 if (!CHANNEL_ID) {
   console.error("❌ Please provide a CHANNEL_ID either via:");
-  console.error("   • Environment variable: CHANNEL_ID=your_channel_id");
   console.error("   • Command line argument: node discord-archiver.js <your_channel_id>");
+  console.error("   • Environment variable: CHANNEL_ID=your_channel_id");
   process.exit(1);
 }
 
