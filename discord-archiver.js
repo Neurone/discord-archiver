@@ -47,13 +47,13 @@ const writeJSON = (file, content) => fs.writeFile(file, JSON.stringify(content, 
 const loadCheckpoints = async () => (await readJSON(CHECKPOINT_PATH))?.channels || {};
 const saveCheckpoint = async (channelId, lastId) => {
   try {
-    const checkPoints = await loadCheckpoints();
-    if (checkPoints[channelId] && checkPoints[channelId] >= lastId) return; // already newer or equal
-    checkPoints[channelId] = lastId;
-    await writeJSON(CHECKPOINT_PATH, { channels: checkPoints });
+    const checkpoints = await loadCheckpoints();
+    if (checkpoints[channelId] && checkpoints[channelId] >= lastId) return; // already newer or equal
+    checkpoints[channelId] = lastId;
+    await writeJSON(CHECKPOINT_PATH, { channels: checkpoints });
   } catch (e) { console.error(`❌ Failed to save checkpoint for ${channelId}:`, e); }
 };
-const getChannelCheckpoint = (checkPoints, id) => checkPoints[id] || null;
+const getChannelCheckpoint = (checkpoints, id) => checkpoints[id] || null;
 
 // ------------------------------------------------------------------
 // Format message content as markdown (with reply reference)
@@ -169,16 +169,16 @@ async function getAllThreads(channel) {
 // Bulk export – runs once at startup (or after a restart)
 // ------------------------------------------------------------------
 async function bulkExport(channel) {
-  const checkPoints = await loadCheckpoints();
-  console.log(`🔎 Bulk export (${Object.keys(checkPoints).length} checkpoints)`);
+  const checkpoints = await loadCheckpoints();
+  console.log(`🔎 Bulk export (${Object.keys(checkpoints).length} checkpoints)`);
   if (channel.type === ChannelType.GuildForum) {
     for (const thread of await getAllThreads(channel)) {
-      const checkPoint = getChannelCheckpoint(checkPoints, thread.id);
+      const checkPoint = getChannelCheckpoint(checkpoints, thread.id);
       console.log(`📝 Thread "${thread.name}" checkPoint=${checkPoint ?? 'none'}`);
       await exportChannelMessages(thread, checkPoint);
     }
   } else {
-    const checkPoint = getChannelCheckpoint(checkPoints, channel.id);
+    const checkPoint = getChannelCheckpoint(checkpoints, channel.id);
     console.log(`📝 Channel "${channel.name || channel.id}" checkPoint=${checkPoint ?? 'none'}`);
     await exportChannelMessages(channel, checkPoint);
   }
@@ -190,14 +190,14 @@ async function bulkExport(channel) {
 // ------------------------------------------------------------------
 async function exportChannelMessages(channel, checkpoint) {
   const opts = { limit: MAX_FETCH_SIZE, ...(checkpoint && { after: checkpoint }) };
-  if (checkpoint) console.log(`📍 checkPoint ${checkpoint} for ${channel.id}`);
+  if (checkpoint) console.log(`📍 Checkpoint ${checkpoint} for ${channel.id}`);
   const fetched = await channel.messages.fetch(opts);
   if (!fetched.size) { if (checkpoint) console.log(`✅ No new messages for ${channel.id}`); return; }
   const list = [...fetched.values()].reverse().filter(m => !checkpoint || m.id > checkpoint);
   let latest = checkpoint;
   for (const m of list) { await writeMessage(m); if (!latest || m.id > latest) latest = m.id; }
   if (latest) await saveCheckpoint(channel.id, latest);
-  console.log(`✅ Processed ${list.length} new messages for ${channel.id}`);
+  console.log(`✅ Processed ${list.length} new messages for "${channel.id}"`);
 }
 
 // ------------------------------------------------------------------
@@ -239,7 +239,7 @@ client.on("messageCreate", async (msg) => {
   // New thread or missed messages - fetch historical
   if (!checkpoint || msg.id > checkpoint) {
     const action = !checkpoint ? 'New thread' : 'Catching up';
-    console.log(`🔄 ${action}: ${msg.channel.name || msg.channel.id}`);
+    console.log(`🔄 ${action} channel "${msg.channel.name || msg.channel.id}"`);
     await exportChannelMessages(msg.channel, checkpoint);
     return;
   }
@@ -263,6 +263,26 @@ client.on("messageDelete", async (msg) => {
   if (!isTargetMessage(msg)) return;
   console.log(`🌍 Message ${msg.id} deleted in "${msg.channel.name || msg.channel.id}"`);
   await deleteMessage(msg.channel.id, msg.id);
+});
+
+client.on("threadUpdate", async (oldThread, newThread) => {
+  // Only care about threads in the target forum channel
+  if (newThread.parent?.id !== CHANNEL_ID) return;
+  // Check if tags changed
+  const oldTags = oldThread.appliedTags || [];
+  const newTags = newThread.appliedTags || [];
+  if (JSON.stringify(oldTags) === JSON.stringify(newTags)) return;
+  console.log(`🌍 Thread "${newThread.name}" tags changed`);
+  // Check if we went from no-match to match
+  const oldMatch = hasMatchingTag(oldThread);
+  const newMatch = hasMatchingTag(newThread);
+  // If a tag was added that matches our filter - start archiving this thread
+  if (!oldMatch && newMatch) {
+    console.log(`🔄 Thread "${newThread.name}" now matches filter - catching up`);
+    const checkpoints = await loadCheckpoints();
+    const checkpoint = checkpoints[newThread.id];
+    await exportChannelMessages(newThread, checkpoint);
+  }
 });
 
 // ------------------------------------------------------------------
