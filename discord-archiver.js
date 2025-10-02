@@ -2,22 +2,20 @@
 import dotenvx from '@dotenvx/dotenvx';
 dotenvx.config()
 
-import {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  ChannelType,
-} from "discord.js";
+import { Client, GatewayIntentBits, Partials, ChannelType } from "discord.js";
 import { promises as fs } from "fs";
 import path from "path";
 
 // -------------------- CONFIGURATION --------------------
-const API_TOKEN = process.env.API_TOKEN;                                              // keep secret!
-const CHANNEL_ID = process.argv[2] || process.env.CHANNEL_ID;                         // from CLI arg or env var or exit
-const MAX_FETCH_SIZE = process.env.MAX_FETCH_SIZE || 100;                             // max allowed by Discord API
-const OUTPUT_ROOT = process.env.OUTPUT_ROOT || "./archive";                           // where markdown lands
-const CHECKPOINT_PATH = process.env.CHECKPOINT_PATH || "./archive/checkpoints.json";  // tiny JSON file
-const FILTER_TAGS = process.env.FILTER_TAGS ? process.env.FILTER_TAGS.split(',').map(tag => tag.trim().toLowerCase()) : []; // comma-separated tags to filter
+const API_TOKEN = process.env.API_TOKEN; // keep secret!
+const CHANNEL_ID = process.argv[2] || process.env.CHANNEL_ID; // from CLI arg or env var or exit
+const MAX_FETCH_SIZE = Number(process.env.MAX_FETCH_SIZE) || 100; // max allowed by Discord API
+const OUTPUT_ROOT = process.env.OUTPUT_ROOT || "./archive"; // where markdown lands
+const CHECKPOINT_PATH = process.env.CHECKPOINT_PATH || "./archive/checkpoints.json"; // tiny JSON file
+const FILTER_TAGS = (process.env.FILTER_TAGS || '')
+  .split(',')
+  .map(t => t.trim().toLowerCase())
+  .filter(Boolean);
 // ---------------------------------------------------------
 
 if (!API_TOKEN) {
@@ -32,398 +30,174 @@ if (!CHANNEL_ID) {
   process.exit(1);
 }
 
+// -------------------- Small utilities ----------------------------
+const safeId = v => String(v).replace(/[^a-zA-Z0-9_-]/g, '');
+const getArchiveFilePath = channelId => path.join(OUTPUT_ROOT, `${safeId(channelId)}.md`);
+const ensureArchiveDir = () => fs.mkdir(OUTPUT_ROOT, { recursive: true });
+const formatTimestamp = d => d.toISOString().replace('T', ' ').replace('Z', ' UTC');
+const readFileIfExists = async file => { try { return await fs.readFile(file, 'utf8'); } catch { return null; } };
+
 // ------------------------------------------------------------------
-// Helper: load / save checkpoint per channel/thread
+// Load / save checkpoint per channel/thread
 // ------------------------------------------------------------------
-async function loadCheckpoints() {
+const readJSON = async file => {
+  try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return null; }
+};
+const writeJSON = (file, content) => fs.writeFile(file, JSON.stringify(content, null, 2), 'utf8');
+const loadCheckpoints = async () => (await readJSON(CHECKPOINT_PATH))?.channels || {};
+const saveCheckpoint = async (channelId, lastId) => {
   try {
-    const data = await fs.readFile(CHECKPOINT_PATH, "utf8");
-    const obj = JSON.parse(data);
-    return obj.channels || {};
-  } catch {
-    console.warn("⚠️  checkpoint missing or malformed → starting from scratch:");
-    return {};
-  }
-}
-
-async function saveCheckpoint(channelId, lastId) {
-  try {
-    const checkpoints = await loadCheckpoints();
-    checkpoints[channelId] = lastId;
-    const payload = JSON.stringify({ channels: checkpoints }, null, 2);
-    await fs.writeFile(CHECKPOINT_PATH, payload, "utf8");
-  } catch (error) {
-    console.error(`❌ Failed to save checkpoint for channel ${channelId}:`, error);
-  }
-}
-
-function getChannelCheckpoint(checkpoints, channelId) {
-  return checkpoints[channelId] || null;
-}
+    const checkPoints = await loadCheckpoints();
+    if (checkPoints[channelId] && checkPoints[channelId] >= lastId) return; // already newer or equal
+    checkPoints[channelId] = lastId;
+    await writeJSON(CHECKPOINT_PATH, { channels: checkPoints });
+  } catch (e) { console.error(`❌ Failed to save checkpoint for ${channelId}:`, e); }
+};
+const getChannelCheckpoint = (checkPoints, id) => checkPoints[id] || null;
 
 // ------------------------------------------------------------------
-// Helper: Check if a referenced message is deleted
+// Format message content as markdown (with reply reference)
 // ------------------------------------------------------------------
-async function isMessageDeleted(client, channelId, messageId) {
-  try {
-    const channel = await client.channels.fetch(channelId);
-    if (channel) {
-      await channel.messages.fetch(messageId);
-      return false; // Message exists
-    }
-  } catch (error) {
-    // Message doesn't exist or can't be fetched
-  }
-  return true; // Treat as deleted
-}
-
-// ------------------------------------------------------------------
-// Helper: Format reply reference with deletion check
-// ------------------------------------------------------------------
-async function formatReplyReference(msg) {
-  if (!msg.reference || !msg.reference.messageId) {
-    return "";
-  }
-
-  const refId = msg.reference.messageId;
-  const isDeleted = await isMessageDeleted(msg.client, msg.reference.channelId, refId);
-  
-  if (isDeleted) {
-    return `\nin reply to **DELETED MESSAGE** (${refId})`;
-  } else {
-    return `\nin reply to [${refId}](#${refId})`;
-  }
-}
-
-// ------------------------------------------------------------------
-// Helper: Format message content as markdown
-// ------------------------------------------------------------------
-function formatMessageMarkdown(msg, reference = "") {
+async function formatMessageMarkdown(msg) {
   const author = `${msg.author.username}#${msg.author.discriminator} (${msg.author.id})`;
-  const timestamp = msg.createdAt.toISOString().replace("T", " ").replace("Z", " UTC");
-  
-  // Check if message was edited
-  let modifiedMarker = "";
-  if (msg.editedAt) {
-    const editedTimestamp = msg.editedAt.toISOString().replace("T", " ").replace("Z", " UTC");
-    modifiedMarker = `\n**MODIFIED** last time at *${editedTimestamp}*`;
-  }
-  
-  const escapedContent = msg.content.replace(/`/g, "`\u200b");
+  const ts = formatTimestamp(msg.createdAt);
+  const edited = msg.editedAt ? `\n**MODIFIED** last time at *${formatTimestamp(msg.editedAt)}*` : '';
 
-  // Attachments
-  let attachmentSection = "";
-  if (msg.attachments.size > 0) {
-    const lines = [];
-    for (const att of msg.attachments.values()) {
-      lines.push(`- [${att.name}](${att.url})`);
+  // Handle reply reference
+  let reference = '';
+  if (msg.reference?.messageId) {
+    const refId = msg.reference.messageId;
+    try {
+      const c = await msg.client.channels.fetch(msg.reference.channelId);
+      if (c) await c.messages.fetch(refId);
+      reference = `\nin reply to [${refId}](#${refId})`;
+    } catch {
+      reference = `\nin reply to **DELETED MESSAGE** (${refId})`;
     }
-    attachmentSection = `\n**Attachments:**\n${lines.join("\n")}`;
   }
 
-  return `### Message ${msg.id}\nby ${author}\nat *${timestamp}*${modifiedMarker}${reference}\n\n${escapedContent}\n${attachmentSection}\n---\n\n`;
+  const body = (msg.content || '').replace(/`/g, "`\u200b");
+  const atts = msg.attachments.size
+    ? `\n**Attachments:**\n${[...msg.attachments.values()].map(a => `- [${a.name}](${a.url})`).join('\n')}`
+    : '';
+  return `### Message ${msg.id}\nby ${author}\nat *${ts}*${edited}${reference}\n\n${body}\n${atts}\n---\n\n`;
 }
 
 // ------------------------------------------------------------------
-// Helper: Check if message is in target channel/thread
+// Check if message is in target channel/thread
 // ------------------------------------------------------------------
-function isTargetMessage(msg) {
-  const isTargetChannel = msg.channel.id === CHANNEL_ID;
-  const isThread = msg.channel.isThread && msg.channel.isThread();
-  const isTargetThread = isThread && 
-    msg.channel.parent?.id === CHANNEL_ID && 
-    hasMatchingTag(msg.channel);
-  
-  return isTargetChannel || isTargetThread;
+const isTargetMessage = msg =>
+  msg.channel.id === CHANNEL_ID ||
+  (msg.channel.isThread?.() && msg.channel.parent?.id === CHANNEL_ID && hasMatchingTag(msg.channel));
+
+// ------------------------------------------------------------------
+// Write or append a message to the archive file
+// ------------------------------------------------------------------
+async function writeMessage(msg) {
+  const channelId = msg.channel.id;
+  const channelName = msg.channel.name || `Channel ${channelId}`;
+  await ensureArchiveDir();
+  const filePath = getArchiveFilePath(channelId);
+  const existing = await readFileIfExists(filePath);
+  if (existing?.includes(`### Message ${msg.id}`)) {
+    console.log(`⏭️ Duplicate skip ${msg.id}`); return;
+  }
+  const header = existing ? '' : `# ${channelName}\n\n`;
+  const formatted = await formatMessageMarkdown(msg);
+  await fs.appendFile(filePath, header + formatted, 'utf8');
 }
 
 // ------------------------------------------------------------------
-// Write a single message without updating checkpoint (for bulk operations)
+// Delete a message from the markdown file and update references
 // ------------------------------------------------------------------
-async function writeMessageWithoutCheckpoint(msg, channelContext = null) {
-  // Determine the appropriate file based on channel/thread ID
-  let channelId;
-  let channelName;
-
-  if (channelContext && channelContext.isThread && channelContext.isThread()) {
-    // Use thread ID for thread messages
-    channelId = channelContext.id;
-    channelName = channelContext.name || `Thread ${channelId}`;
-  } else {
-    // Use main channel ID for direct channel messages  
-    channelId = msg.channel.id;
-    channelName = msg.channel.name || `Channel ${channelId}`;
-  }
-
-  await fs.mkdir(OUTPUT_ROOT, { recursive: true });
-
-  // Create filename with just the numeric channelID (allow only safe chars to prevent path traversal)
-  const safeChannelId = String(channelId).replace(/[^a-zA-Z0-9_-]/g, '');
-  const fileName = `${safeChannelId}.md`;
-  const filePath = path.join(OUTPUT_ROOT, fileName);
-
-  // Check if message already exists in the file to prevent duplicates
-  let fileExists = false;
-  let fileContent = "";
-  try {
-    fileContent = await fs.readFile(filePath, "utf8");
-    fileExists = true;
-
-    // Check if this exact message already exists
-    const messageHeader = "### Message " + msg.id;
-
-    if (fileContent.includes(messageHeader)) {
-      // Message already exists, skip writing
-      console.log(`⏭️ Skipping duplicate message ID ${msg.id}: ${msg.content.substring(0, 50)}...`);
-      return;
-    }
-  } catch {
-    // File doesn't exist, we'll create it with header
-  }
-
-  let content = "";
-  if (!fileExists) {
-    content += `# ${channelName}\n\n`;
-  }
-
-  const reference = await formatReplyReference(msg);
-  const md = formatMessageMarkdown(msg, reference);
-  content += md;
-
-  await fs.appendFile(filePath, content, "utf8");
+async function deleteMessage(channelId, messageId) {
+  const filePath = getArchiveFilePath(channelId);
+  const content = await readFileIfExists(filePath);
+  if (!content) return;
+  const msgRegex = new RegExp(`### Message ${messageId}\\n[\\s\\S]*?\\n---\\n\\n`, 'g');
+  if (!msgRegex.test(content)) { console.log(`⚠️  Message ${messageId} not found`); return; }
+  const updated = content
+    .replace(msgRegex, '')
+    .replace(new RegExp(`in reply to \\[${messageId}\\]\\(#${messageId}\\)`, 'g'), `in reply to **DELETED MESSAGE** (${messageId})`);
+  await fs.writeFile(filePath, updated, 'utf8');
+  console.log(`🗑️  Removed message ${messageId} + updated references`);
 }
 
 // ------------------------------------------------------------------
-// Helper: Delete a message from the markdown file and update references
+// Update a message in the markdown file
 // ------------------------------------------------------------------
-async function deleteMessageFromFile(channelId, messageId) {
-  // Create filename with just the numeric channelID (allow only safe chars to prevent path traversal)
-  const safeChannelId = String(channelId).replace(/[^a-zA-Z0-9_-]/g, '');
-  const fileName = `${safeChannelId}.md`;
-  const filePath = path.join(OUTPUT_ROOT, fileName);
-
-  try {
-    let content = await fs.readFile(filePath, "utf8");
-    
-    // Find and remove the message section completely
-    const messageRegex = new RegExp(`### Message ${messageId}\\n[\\s\\S]*?\\n---\\n\\n`, 'g');
-    
-    const match = content.match(messageRegex);
-    if (match) {
-      // Remove the message
-      content = content.replace(messageRegex, '');
-      
-      // Update all references to this deleted message
-      // Find all reply references to this message and mark them as deleted
-      const replyRegex = new RegExp(`(in reply to \\[${messageId}\\]\\(#${messageId}\\))`, 'g');
-      content = content.replace(replyRegex, `in reply to **DELETED MESSAGE** (${messageId})`);
-      
-      await fs.writeFile(filePath, content, "utf8");
-      console.log(`🗑️  Removed message ${messageId} and updated references in file`);
-      return true;
-    } else {
-      console.log(`⚠️  Message ${messageId} not found in file`);
-      return false;
-    }
-  } catch (error) {
-    console.error(`❌ Failed to delete message ${messageId}:`, error);
-    return false;
-  }
+async function updateMessage(msg) {
+  const filePath = getArchiveFilePath(msg.channel.id);
+  const content = await readFileIfExists(filePath);
+  if (!content) { await writeMessage(msg); return; }
+  const regex = new RegExp(`(### Message ${msg.id}\\n)([\\s\\S]*?)(\\n---\\n)`, 'm');
+  if (!regex.test(content)) { console.log(`➕ Adding message ${msg.id}`); await writeMessage(msg); return; }
+  if (!msg.editedAt) msg.editedAt = new Date();
+  const formatted = await formatMessageMarkdown(msg);
+  const replaced = content.replace(regex, formatted);
+  await fs.writeFile(filePath, replaced, 'utf8');
+  console.log(`✏️  Updated message ${msg.id}`);
 }
 
 // ------------------------------------------------------------------
-// Helper: Update a message in the markdown file (keep old version with marker)
-// ------------------------------------------------------------------
-async function updateMessageInFile(msg, channelContext = null) {
-  const channelId = channelContext ? channelContext.id : msg.channel.id;
-  const messageId = msg.id;
-  // Create filename with just the numeric channelID (allow only safe chars to prevent path traversal)
-  const safeChannelId = String(channelId).replace(/[^a-zA-Z0-9_-]/g, '');
-  const fileName = `${safeChannelId}.md`;
-  const filePath = path.join(OUTPUT_ROOT, fileName);
-  
-  try {
-    const content = await fs.readFile(filePath, "utf8");
-    
-    // Find the message section
-    const messageRegex = new RegExp(`(### Message ${messageId}\\n)([\\s\\S]*?)(\\n---\\n)`, 'm');
-    const match = content.match(messageRegex);
-    
-    if (match) {
-      // Force editedAt to current time for modification marker
-      if (!msg.editedAt) {
-        msg.editedAt = new Date();
-      }
-      
-      const reference = await formatReplyReference(msg);
-      const newContent = formatMessageMarkdown(msg, reference);
-      
-      const updatedContent = content.replace(messageRegex, newContent);
-      await fs.writeFile(filePath, updatedContent, "utf8");
-      console.log(`✏️  Updated message ${messageId} in local file`);
-      return true;
-    } else {
-      // Message wasn't in file, just add it
-      console.log(`➕ Adding message ${messageId} to local file`);
-      await writeMessageWithoutCheckpoint(msg, channelContext);
-      return false;
-    }
-  } catch (error) {
-    console.error(`❌ Failed to update message ${messageId}:`, error);
-    return false;
-  }
-}
-
-// ------------------------------------------------------------------
-// Helper: check if a thread has any of the required tagsf
+// Check if a thread has any of the required tags
 // ------------------------------------------------------------------
 function hasMatchingTag(thread) {
-  if (FILTER_TAGS.length === 0) {
-    // No filter tags specified, include all threads
-    return true;
-  }
-
-  if (!thread.appliedTags || thread.appliedTags.length === 0) {
-    // Thread has no tags
-    return false;
-  }
-
-  // Get the forum channel to access tag names
-  const channel = thread.parent;
-  if (!channel || !channel.availableTags) {
-    return false;
-  }
-
-  // Convert thread tag IDs to tag names
-  const threadTagNames = thread.appliedTags
-    .map(tagId => {
-      const tag = channel.availableTags.find(availableTag => availableTag.id === tagId);
-      return tag ? tag.name.toLowerCase() : null;
-    })
-    .filter(name => name !== null);
-
-  // Check if any thread tag matches any filter tag (case insensitive)
-  return threadTagNames.some(tagName =>
-    FILTER_TAGS.some(filterTag => tagName.includes(filterTag) || filterTag.includes(tagName))
-  );
+  if (FILTER_TAGS.length === 0) return true;
+  const tags = thread.appliedTags?.length ? thread.appliedTags : [];
+  const parent = thread.parent;
+  if (!parent?.availableTags?.length || !tags.length) return false;
+  const names = tags.map(id => parent.availableTags.find(t => t.id === id)?.name?.toLowerCase()).filter(Boolean);
+  return names.some(n => FILTER_TAGS.some(f => n.includes(f) || f.includes(n)));
 }
 
 // ------------------------------------------------------------------
-// Helper: get all threads from a forum channel
+// Get all threads from a forum channel
 // ------------------------------------------------------------------
 async function getAllThreads(channel) {
-  const threads = [];
-
-  // Get active threads
-  const activeThreads = await channel.threads.fetchActive();
-  threads.push(...activeThreads.threads.values());
-
-  // Get archived threads (both public and private)
-  const archivedThreads = await channel.threads.fetchArchived();
-  threads.push(...archivedThreads.threads.values());
-
-  // Filter threads by tags if specified
-  const filteredThreads = threads.filter(thread => hasMatchingTag(thread));
-
-  console.log(`📚 Found ${threads.length} threads in channel "${channel.name || channel.id}"`);
-
-  if (FILTER_TAGS.length > 0) {
-    console.log(`🏷️  Filtering by tags: ${FILTER_TAGS.join(', ')}`);
-    console.log(`📊 Found ${filteredThreads.length}/${threads.length} threads matching filter criteria`);
-  }
-
-  return filteredThreads;
+  const threads = [
+    ...(await channel.threads.fetchActive()).threads.values(),
+    ...(await channel.threads.fetchArchived()).threads.values(),
+  ];
+  const list = [...threads].filter(t => hasMatchingTag(t));
+  console.log(`📚 Threads: ${list.length}/${[...threads].length} match in "${channel.name || channel.id}"`);
+  if (FILTER_TAGS.length) console.log(`🏷️ Tags filter: ${FILTER_TAGS.join(', ')}`);
+  return list;
 }
 
 // ------------------------------------------------------------------
 // Bulk export – runs once at startup (or after a restart)
 // ------------------------------------------------------------------
 async function bulkExport(channel) {
-  const checkpoints = await loadCheckpoints();
-  console.log(`🔎 Starting bulk export with ${Object.keys(checkpoints).length} existing checkpoints`);
-
+  const checkPoints = await loadCheckpoints();
+  console.log(`🔎 Bulk export (${Object.keys(checkPoints).length} checkpoints)`);
   if (channel.type === ChannelType.GuildForum) {
-    // Handle forum channel - export all threads matching filter
     for (const thread of await getAllThreads(channel)) {
-      const threadCheckpoint = getChannelCheckpoint(checkpoints, thread.id);
-      console.log(`📝 Exporting thread "${thread.name}" (checkpoint: ${threadCheckpoint ?? "none"})`);
-      await exportChannelMessages(thread, threadCheckpoint);
+      const checkPoint = getChannelCheckpoint(checkPoints, thread.id);
+      console.log(`📝 Thread "${thread.name}" checkPoint=${checkPoint ?? 'none'}`);
+      await exportChannelMessages(thread, checkPoint);
     }
   } else {
-    // Handle regular text channel
-    const channelCheckpoint = getChannelCheckpoint(checkpoints, channel.id);
-    console.log(`📝 Exporting channel "${channel.name || channel.id}" (checkpoint: ${channelCheckpoint ?? "none"})`);
-    await exportChannelMessages(channel, channelCheckpoint);
+    const checkPoint = getChannelCheckpoint(checkPoints, channel.id);
+    console.log(`📝 Channel "${channel.name || channel.id}" checkPoint=${checkPoint ?? 'none'}`);
+    await exportChannelMessages(channel, checkPoint);
   }
-
-  console.log("✅ Bulk export completed.");
+  console.log('✅ Bulk export done.');
 }
 
 // ------------------------------------------------------------------
 // Export messages from a specific channel or thread
 // ------------------------------------------------------------------
 async function exportChannelMessages(channel, checkpoint) {
-  // If we have a checkpoint, only fetch messages newer than it
-  let options = {
-    limit: MAX_FETCH_SIZE,
-  };
-
-  // Only add 'after' if we have a checkpoint - this fetches messages AFTER the checkpoint
-  if (checkpoint) {
-    options.after = checkpoint;
-    console.log(`📍 Using checkpoint ${checkpoint} for channel ${channel.id}`);
-  }
-
-  let processedCount = 0;
-  let latestMessageId = checkpoint; // Track the latest message ID for checkpoint updating
-  let done = false;
-
-  while (!done) {
-    const fetched = await channel.messages.fetch(options);
-    if (fetched.size === 0) {
-      done = true;
-      break;
-    }
-
-    // Messages come newest→oldest; reverse to process chronologically
-    const msgs = [...fetched.values()].reverse();
-    let batchProcessedCount = 0;
-
-    for (const msg of msgs) {
-      // Skip if message is older than or equal to checkpoint (safety check)
-      if (checkpoint && msg.id <= checkpoint) {
-        continue;
-      }
-
-      console.log(`🔄 Processing message ${msg.id}`);
-
-      // Write message without updating checkpoint yet
-      await writeMessageWithoutCheckpoint(msg, channel);
-
-      // Track the latest message ID
-      if (!latestMessageId || msg.id > latestMessageId) {
-        latestMessageId = msg.id;
-      }
-
-      processedCount++;
-      batchProcessedCount++;
-    }
-
-    // Only update checkpoint after processing the entire batch
-    if (batchProcessedCount > 0 && latestMessageId) {
-      await saveCheckpoint(channel.id, latestMessageId);
-    }
-
-    // Stop fetching - we got all messages in this batch
-    // Since we're using 'after', we only get messages newer than checkpoint
-    done = true;
-  }
-
-  if (processedCount === 0 && checkpoint) {
-    console.log(`✅ No new messages found for channel ${channel.id}`);
-  } else {
-    console.log(`✅ Processed ${processedCount} new messages for channel ${channel.id}`);
-  }
+  const opts = { limit: MAX_FETCH_SIZE, ...(checkpoint && { after: checkpoint }) };
+  if (checkpoint) console.log(`📍 checkPoint ${checkpoint} for ${channel.id}`);
+  const fetched = await channel.messages.fetch(opts);
+  if (!fetched.size) { if (checkpoint) console.log(`✅ No new messages for ${channel.id}`); return; }
+  const list = [...fetched.values()].reverse().filter(m => !checkpoint || m.id > checkpoint);
+  let latest = checkpoint;
+  for (const m of list) { await writeMessage(m); if (!latest || m.id > latest) latest = m.id; }
+  if (latest) await saveCheckpoint(channel.id, latest);
+  console.log(`✅ Processed ${list.length} new messages for ${channel.id}`);
 }
 
 // ------------------------------------------------------------------
@@ -450,65 +224,45 @@ client.once("clientReady", async () => {
     process.exit(1);
   }
 
-  // 1️⃣ Run the one‑time back‑fill (skipping anything already saved)
+  // Run the one‑time back‑fill (skipping anything already saved)
   await bulkExport(channel);
 
-  // 2️⃣ From now on, `messageCreate` will fire for every new message.
+  // Listen for messageCreate, messageUpdate, and messageDelete
   console.log("👂 Listening for new messages…");
 });
 
 client.on("messageCreate", async (msg) => {
-  // Only process messages from the target channel or matching threads
   if (!isTargetMessage(msg)) return;
-
-  // Check if this is a new thread or if we need to catch up on missed messages
   const checkpoints = await loadCheckpoints();
   const checkpoint = checkpoints[msg.channel.id];
 
-  if (!checkpoint) {
-    // This is a new thread - fetch all historical messages first
-    console.log(`📥 New thread detected: ${msg.channel.name || msg.channel.id} - fetching historical messages...`);
-    await exportChannelMessages(msg.channel);
-    return; // exportChannelMessages already saved the checkpoint
-  }
-
-  // Check if there are missed messages (e.g., tag was removed and re-added)
-  if (msg.id > checkpoint) {
-    // Fetch all messages since the last checkpoint to catch any missed ones
-    console.log(`🔄 Catching up on missed messages for: ${msg.channel.name || msg.channel.id}`);
+  // New thread or missed messages - fetch historical
+  if (!checkpoint || msg.id > checkpoint) {
+    const action = !checkpoint ? 'New thread' : 'Catching up';
+    console.log(`🔄 ${action}: ${msg.channel.name || msg.channel.id}`);
     await exportChannelMessages(msg.channel, checkpoint);
-    return; // exportChannelMessages already saved the checkpoint
+    return;
   }
 
-  // For real-time messages that are already up to date, write and update checkpoint immediately
-  await writeMessageWithoutCheckpoint(msg, msg.channel);
+  // Real-time message
+  await writeMessage(msg);
   await saveCheckpoint(msg.channel.id, msg.id);
 });
 
 client.on("messageUpdate", async (oldMsg, msg) => {
-  // Partial messages need to be fetched
   if (msg.partial) {
-    try {
-      await msg.fetch();
-    } catch (error) {
-      console.error('❌ Failed to fetch partial message:', error);
-      return;
-    }
+    try { await msg.fetch(); }
+    catch (error) { console.error('❌ Failed to fetch partial message:', error); return; }
   }
-
-  // Only process messages from the target channel or matching threads
   if (!isTargetMessage(msg)) return;
-
-  console.log(`🌍 Message ${msg.id} updated in Discord channel "${msg.channel.name || msg.channel.id}"`);
-  await updateMessageInFile(msg, msg.channel);
+  console.log(`🌍 Message ${msg.id} updated in "${msg.channel.name || msg.channel.id}"`);
+  await updateMessage(msg);
 });
 
 client.on("messageDelete", async (msg) => {
-  // Only process messages from the target channel or matching threads
   if (!isTargetMessage(msg)) return;
-
-  console.log(`🌍 Message ${msg.id} deleted in Discord channel "${msg.channel.name || msg.channel.id}"`);
-  await deleteMessageFromFile(msg.channel.id, msg.id);
+  console.log(`🌍 Message ${msg.id} deleted in "${msg.channel.name || msg.channel.id}"`);
+  await deleteMessage(msg.channel.id, msg.id);
 });
 
 // ------------------------------------------------------------------
