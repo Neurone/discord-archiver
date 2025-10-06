@@ -10,8 +10,8 @@ import path from "path";
 const API_TOKEN = process.env.API_TOKEN; // keep secret!
 const CHANNEL_ID = process.argv[2] || process.env.CHANNEL_ID; // from CLI arg or env var or exit
 const MAX_FETCH_SIZE = Number(process.env.MAX_FETCH_SIZE) || 100; // max allowed by Discord API
-const OUTPUT_ROOT = process.env.OUTPUT_ROOT || "./archive"; // where markdown lands
-const CHECKPOINT_PATH = process.env.CHECKPOINT_PATH || "./checkpoints.json"; // tiny JSON file
+const OUTPUT_ROOT = process.env.OUTPUT_ROOT || "./data/archive"; // where markdown lands
+const CHECKPOINT_PATH = process.env.CHECKPOINT_PATH || "./data/checkpoints.json"; // tiny JSON file
 const FILTER_TAGS = (process.env.FILTER_TAGS || '')
   .split(',')
   .map(t => t.trim().toLowerCase())
