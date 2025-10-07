@@ -69,7 +69,7 @@ const MessageFormat = {
 
   // Message metadata format
   metadata: {
-    author: (username, discriminator, userId) => `by ${username}#${discriminator} (${userId})`,
+    author: (displayName, username, discriminator, userId) => `By @${displayName} (${username}#${discriminator} ${userId})`,
     timestamp: (ts) => `at *${ts}*`,
     modified: (ts) => `**MODIFIED** last time at *${ts}*`,
   },
@@ -159,10 +159,69 @@ const MessagePatterns = {
 };
 
 // ------------------------------------------------------------------
+// Resolve user mentions in message content
+// ------------------------------------------------------------------
+async function resolveUserMentions(content, msg) {
+  if (!content || !content.includes('<@')) return content;
+  
+  // Find all user mentions <@userId> or <@!userId>
+  const mentionPattern = /<@!?(\d+)>/g;
+  const mentions = [...content.matchAll(mentionPattern)];
+  
+  let result = content;
+  for (const match of mentions) {
+    const userId = match[1];
+    const mentionText = match[0];
+    
+    try {
+      // Try to get user from message mentions first (cached)
+      let user = msg.mentions.users.get(userId);
+      
+      // If not in mentions, try to fetch from client
+      if (!user) {
+        user = await msg.client.users.fetch(userId);
+      }
+      
+      if (user) {
+        // Try to get member to access display name (server nickname)
+        // Use globalName (new Discord display name) or displayName from member, or fall back to username
+        let displayName = user.globalName || user.username;
+        try {
+          const member = await msg.guild.members.fetch(userId);
+          displayName = member.displayName || user.globalName || user.username;
+        } catch {
+          // If we can't get member info, use globalName or username
+        }
+        
+        const fullMention = `@${displayName} (${user.username}#${user.discriminator} ${userId})`;
+        result = result.replace(mentionText, fullMention);
+      }
+    } catch (error) {
+      // If we can't resolve the user, leave the mention as-is or mark as unknown
+      console.log(`⚠️  Could not resolve user mention ${userId}`);
+      result = result.replace(mentionText, `@Unknown-User(${userId})`);
+    }
+  }
+  
+  return result;
+}
+
+// ------------------------------------------------------------------
 // Format message content as markdown (with reply reference)
 // ------------------------------------------------------------------
 async function formatMessageMarkdown(msg) {
+  // Get author display name (server nickname, globalName, or username)
+  // Use globalName (new Discord display name) or displayName from member, or fall back to username
+  let displayName = msg.author.globalName || msg.author.username;
+  try {
+    const member = await msg.guild.members.fetch(msg.author.id);
+    displayName = member.displayName || msg.author.globalName || msg.author.username;
+  } catch {
+    // If we can't get member info, use globalName or username
+  }
+  
   const author = MessageFormat.metadata.author(
+    displayName,
     msg.author.username,
     msg.author.discriminator,
     msg.author.id
@@ -187,7 +246,11 @@ async function formatMessageMarkdown(msg) {
   }
 
   // Sanitize and wrap content in code block to prevent markdown injection
-  const rawContent = msg.content || '';
+  let rawContent = msg.content || '';
+  
+  // Resolve user mentions before sanitizing
+  rawContent = await resolveUserMentions(rawContent, msg);
+  
   const { fence, content } = MessageFormat.codeBlock.sanitize(rawContent);
   const body = content ? `${fence}${MessageFormat.codeBlock.language}\n${content}\n${fence}` : '';
 
