@@ -89,6 +89,22 @@ const MessageFormat = {
     header: '**Attachments:**',
     item: (name, url) => `- [${name}](${url})`,
   },
+
+  // Code block wrapper for message content (prevents markdown injection)
+  codeBlock: {
+    language: 'txt', // Language identifier for the code block
+    // Sanitize content to prevent breaking out of code blocks
+    sanitize: (content) => {
+      if (!content) return '';
+      // Find the longest sequence of backticks in the content
+      const backtickMatches = content.match(/`+/g) || [];
+      const maxBackticks = backtickMatches.reduce((max, match) => Math.max(max, match.length), 2);
+      // Use one more backtick than the longest sequence found (minimum 3)
+      const fenceLength = Math.max(3, maxBackticks + 1);
+      const fence = '`'.repeat(fenceLength);
+      return { fence, content };
+    },
+  },
 };
 
 // ------------------------------------------------------------------
@@ -170,7 +186,10 @@ async function formatMessageMarkdown(msg) {
     }
   }
 
-  const body = (msg.content || '').replace(/`/g, "`\u200b");
+  // Sanitize and wrap content in code block to prevent markdown injection
+  const rawContent = msg.content || '';
+  const { fence, content } = MessageFormat.codeBlock.sanitize(rawContent);
+  const body = content ? `${fence}${MessageFormat.codeBlock.language}\n${content}\n${fence}` : '';
 
   // Format attachments using MessageFormat
   const atts = msg.attachments.size
