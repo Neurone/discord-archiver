@@ -12,16 +12,19 @@ npx dotenvx set API_TOKEN "<YOUR_DISCORD_BOT_TOKEN>"
 npm start <CHANNEL_ID>
 ```
 
-Archives are saved as Markdown files in the `archive/` directory.
+Archives are saved as Markdown files in the `data/archive/` directory.
 
 ## Features
 
+- Multi-channel support: Archive multiple channels simultaneously by providing comma-separated channel IDs
 - Incremental archiving with per-channel/thread checkpoints (no re-downloading history each run)
 - Supports regular text channels and forum channels (including archived threads)
 - Optional thread filtering by forum tags via `FILTER_TAGS`
 - Real-time capture of new messages after initial backfill
 - Message edits reflected in place with a `MODIFIED` marker and latest edit timestamp
 - Message deletions remove the original block and automatically update any replies to show `DELETED MESSAGE (id)`
+- User mention resolution: Converts `<@userId>` to readable format like `@DisplayName (username#discriminator userId)`
+- Markdown injection protection: Message content wrapped in code blocks with automatic fence length detection
 - Preserves reply context; replies to already-deleted messages are marked during both bulk export and live mode
 - Attachment links preserved (filename + direct URL)
 - Safe filename handling (sanitized channel/thread IDs)
@@ -34,38 +37,71 @@ Set via `npx dotenvx set <NAME> <VALUE>` or your preferred method.
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `API_TOKEN` | Yes | Discord bot token (with Message Content intent enabled) |
-| `CHANNEL_ID` | Yes (unless passed as CLI arg) | ID of the channel (text or forum) to archive |
+| `CHANNEL_IDS` | Yes (unless passed as CLI arg) | Comma-separated list of channel IDs (text or forum) to archive |
 | `FILTER_TAGS` | No | Comma-separated list of forum tag names to include (case-insensitive, substring match) |
 | `MAX_FETCH_SIZE` | No | Batch size for each fetch (default 100, Discord max) |
-| `OUTPUT_ROOT` | No | Output directory for markdown (default `./archive`) |
-| `CHECKPOINT_PATH` | No | Path to checkpoints JSON (default `./archive/checkpoints.json`) |
+| `OUTPUT_ROOT` | No | Output directory for markdown (default `./data/archive`) |
+| `CHECKPOINT_PATH` | No | Path to checkpoints JSON (default `./data/checkpoints.json`) |
 
-CLI argument `<CHANNEL_ID>` overrides absence of `CHANNEL_ID` in env.
+CLI argument `<CHANNEL_ID1,CHANNEL_ID2,...>` overrides absence of `CHANNEL_IDS` in env.
 
 ## Output Format
 
-Each channel or thread is archived to `archive/<CHANNEL_OR_THREAD_ID>.md`.
+Each channel or thread is archived to `data/archive/<CHANNEL_OR_THREAD_ID>.md`.
 
 Message structure example:
 
-```markdown
-### Message 1234567890123456789
-by alice#0 (111111111111111111)
+````markdown
+# Channel Name
+
+Original conversation link: <https://discord.com/channels/GUILD_ID/CHANNEL_ID/MESSAGE_ID>
+
+## Message 1234567890123456789
+
+By @DisplayName (username#0 111111111111111111)
 at *2025-01-01 10:00:00.000 UTC*
 **MODIFIED** last time at *2025-01-01 10:05:30.000 UTC*
-in reply to **DELETED MESSAGE** (1234567890123000000)
+in reply to [1234567890123000000](#message-1234567890123000000)
 
-This is the message body (supports markdown as-is)
-
-**Attachments:**
-- [image.png](https://cdn.discordapp.com/attachments/…/image.png)
----
+```txt
+This is the message body, safely wrapped in a code block.
+User mentions like @OtherUser (other#0 222222222222222222) are automatically resolved.
 ```
 
+**Attachments:**
+
+- [image.png](https://cdn.discordapp.com/attachments/…/image.png)
+````
+
 Notes:
-- `**MODIFIED**` line appears only if the message has been edited.
-- Reply line appears only for replies; if the parent was deleted, it is annotated as `DELETED MESSAGE`.
-- Deleted messages are fully removed; their former replies update automatically.
+
+- Message content is wrapped in code blocks (` ```txt `) to prevent markdown injection
+- User mentions are resolved to: `@DisplayName (username#discriminator userId)`
+- `**MODIFIED**` line appears only if the message has been edited
+- Reply line appears only for replies; if the parent was deleted, it shows `DELETED MESSAGE`
+- Deleted messages are fully removed; their former replies update automatically
+- Code fence length automatically adjusts to prevent breaking out (e.g., ```````` for messages containing ` ``` `)
+
+## Multi-Channel Archiving
+
+Archive multiple channels at once:
+
+```sh
+npm start 1234567890123456789,9876543210987654321,1111222233334444555
+```
+
+Or via environment variable:
+
+```sh
+npx dotenvx set CHANNEL_IDS "1234567890123456789,9876543210987654321"
+npx dotenvx run -- node discord-archiver.js
+```
+
+The archiver will:
+
+1. Validate all provided channel IDs
+2. Process each channel's history sequentially
+3. Monitor all channels simultaneously for real-time updates
 
 ## Real-Time Behavior
 
@@ -91,17 +127,19 @@ The file at `CHECKPOINT_PATH` stores the last processed message ID per channel/t
 
 ```json
 {
-	"channels": {
-		"1423048371555405876": "1423073354352562186"
-	}
+  "channels": {
+    "1423048371555405876": "1423073354352562186"
+  }
 }
 ```
 
 During startup:
+
 - If a checkpoint exists: only messages with IDs greater than the stored ID are fetched (using Discord's `after` option).
 - If missing/corrupt: a full backfill is performed.
 
 During runtime:
+
 - New messages are appended immediately and checkpoint updated.
 - If a tag reconfiguration or missed gap occurs, the logic re-fetches only the missing span.
 
@@ -120,29 +158,6 @@ During runtime:
 - No rich embed capture; only message `content` and attachment URLs.
 - Does not currently export reactions or pin status.
 
-## Cleaning Archives
-
-## Configuration Options
-
-### Optional: Filter Forum Threads by Tags
-
-When archiving forum channels, you can filter specific threads by tags:
-
-```sh
-npx dotenvx set FILTER_TAGS "bug,feature-request"
-```
-
-Multiple tags can be comma-separated. Only threads with matching tags will be archived. Leave unset to archive all threads.
-
-### Optional: Set Channel ID via Environment
-
-Instead of passing the channel ID as an argument, you can set it as an environment variable:
-
-```sh
-npx dotenvx set CHANNEL_ID "<YOUR_CHANNEL_ID>"
-npx dotenvx run -- node discord-archiver.js
-```
-
 ## Setup Details
 
 ### Get Your Discord Bot Token
@@ -160,20 +175,23 @@ Enable Developer Mode in Discord (Settings → Advanced → Developer Mode), the
 
 ## Usage
 
-Run the archiver for a specific channel:
+Run the archiver for one or more channels:
+
 ```sh
-npx dotenvx run -- node discord-archiver.js <CHANNEL_ID>
+npx dotenvx run -- node discord-archiver.js <CHANNEL_ID1,CHANNEL_ID2,...>
 ```
 
 The archiver will:
-- Download all existing messages from the channel
-- Save them as a Markdown file in `archive/`
+
+- Download all existing messages from the specified channel(s)
+- Save them as Markdown files in `data/archive/`
 - Continue listening for new messages
-- Update the archive in real-time
+- Update the archives in real-time
 
 ## Cleaning Archives
 
 Remove all archived data:
+
 ```sh
 npm run clean
 ```
@@ -194,4 +212,3 @@ Enable verbose logging by temporarily adding custom `console.log` lines where ne
 ## License
 
 MIT License. See `LICENSE` file.
-
