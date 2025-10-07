@@ -59,31 +59,128 @@ const saveCheckpoint = async (channelId, lastId) => {
 const getChannelCheckpoint = (checkpoints, id) => checkpoints[id] || null;
 
 // ------------------------------------------------------------------
+// CENTRALIZED MESSAGE FORMAT CONFIGURATION
+// Define the message structure here. All patterns and operations
+// are automatically derived from this configuration.
+// ------------------------------------------------------------------
+const MessageFormat = {
+  // The main section delimiter - change this to change how messages are separated
+  sectionMarker: (msgId) => `## Message ${msgId}`,
+
+  // Message metadata format
+  metadata: {
+    author: (username, discriminator, userId) => `by ${username}#${discriminator} (${userId})`,
+    timestamp: (ts) => `at *${ts}*`,
+    modified: (ts) => `**MODIFIED** last time at *${ts}*`,
+  },
+
+  // How to identify a reply reference link
+  replyLinkFormat: {
+    prefix: 'in reply to ',
+    linkText: (msgId) => msgId,
+    linkHref: (msgId) => `#message-${msgId}`,
+  },
+
+  // How to show a deleted message reference
+  deletedReplyFormat: (msgId) => `**DELETED MESSAGE** (${msgId})`,
+
+  // Attachments format
+  attachments: {
+    header: '**Attachments:**',
+    item: (name, url) => `- [${name}](${url})`,
+  },
+};
+
+// ------------------------------------------------------------------
+// AUTO-GENERATED PATTERNS FROM FORMAT CONFIGURATION
+// These are automatically generated from MessageFormat above.
+// DO NOT MODIFY THESE DIRECTLY - change MessageFormat instead.
+// ------------------------------------------------------------------
+const MessagePatterns = {
+  // Get the section marker string
+  sectionMarker: (msgId) => MessageFormat.sectionMarker(msgId),
+
+  // Escape special regex characters in a string
+  escapeRegex: (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+
+  // Generate regex to match a complete message block
+  messageBlockRegex: (msgId) => {
+    const marker = MessageFormat.sectionMarker(msgId);
+    const escapedMarker = MessagePatterns.escapeRegex(marker);
+    // Extract just the prefix part (e.g., "## Message ") for the lookahead
+    const markerPrefix = MessageFormat.sectionMarker('').replace(/\s*$/, ''); // Remove trailing space if ID was empty
+    const escapedPrefix = MessagePatterns.escapeRegex(markerPrefix);
+    // Match: (start or newline)(exact marker + newline + content until next marker or end)
+    return new RegExp(
+      `(^|\\n)(${escapedMarker}\\n(?:(?!\\n${escapedPrefix} ).)*?)(?=\\n${escapedPrefix} |$)`,
+      'gs'
+    );
+  },
+
+  // Generate regex to find reply references
+  replyReferenceRegex: (msgId) => {
+    const { prefix, linkText, linkHref } = MessageFormat.replyLinkFormat;
+    const text = linkText(msgId);
+    const href = linkHref(msgId);
+    const escapedPrefix = MessagePatterns.escapeRegex(prefix);
+    const escapedText = MessagePatterns.escapeRegex(text);
+    const escapedHref = MessagePatterns.escapeRegex(href);
+    return new RegExp(`${escapedPrefix}\\[${escapedText}\\]\\(${escapedHref}\\)`, 'g');
+  },
+
+  // Generate deleted message reference string
+  deletedMessageReference: (msgId) => {
+    const { prefix } = MessageFormat.replyLinkFormat;
+    const deletedText = MessageFormat.deletedReplyFormat(msgId);
+    return `${prefix}${deletedText}`;
+  },
+
+  // Check if content contains a message with this ID
+  containsMessage: (content, msgId) => {
+    const marker = MessageFormat.sectionMarker(msgId);
+    return content.includes(marker);
+  },
+};
+
+// ------------------------------------------------------------------
 // Format message content as markdown (with reply reference)
 // ------------------------------------------------------------------
 async function formatMessageMarkdown(msg) {
-  const author = `${msg.author.username}#${msg.author.discriminator} (${msg.author.id})`;
-  const ts = formatTimestamp(msg.createdAt);
-  const edited = msg.editedAt ? `\n**MODIFIED** last time at *${formatTimestamp(msg.editedAt)}*` : '';
+  const author = MessageFormat.metadata.author(
+    msg.author.username,
+    msg.author.discriminator,
+    msg.author.id
+  );
+  const ts = MessageFormat.metadata.timestamp(formatTimestamp(msg.createdAt));
+  const edited = msg.editedAt
+    ? `\n${MessageFormat.metadata.modified(formatTimestamp(msg.editedAt))}`
+    : '';
 
-  // Handle reply reference
+  // Handle reply reference - using MessageFormat
   let reference = '';
   if (msg.reference?.messageId) {
     const refId = msg.reference.messageId;
     try {
       const c = await msg.client.channels.fetch(msg.reference.channelId);
       if (c) await c.messages.fetch(refId);
-      reference = `\nin reply to [${refId}](#message-${refId})`;
+      const { prefix, linkText, linkHref } = MessageFormat.replyLinkFormat;
+      reference = `\n${prefix}[${linkText(refId)}](${linkHref(refId)})`;
     } catch {
-      reference = `\nin reply to **DELETED MESSAGE** (${refId})`;
+      reference = `\n${MessagePatterns.deletedMessageReference(refId)}`;
     }
   }
 
   const body = (msg.content || '').replace(/`/g, "`\u200b");
+
+  // Format attachments using MessageFormat
   const atts = msg.attachments.size
-    ? `\n\n**Attachments:**\n\n${[...msg.attachments.values()].map(a => `- [${a.name}](${a.url})`).join('\n')}`
+    ? `\n\n${MessageFormat.attachments.header}\n\n${[...msg.attachments.values()]
+      .map(a => MessageFormat.attachments.item(a.name, a.url))
+      .join('\n')}`
     : '';
-  return `\n## Message ${msg.id}\n\nby ${author}\nat *${ts}*${edited}${reference}\n\n${body}${atts}\n`;
+
+  // Use MessageFormat for the section marker
+  return `\n${MessageFormat.sectionMarker(msg.id)}\n\n${author}\n${ts}${edited}${reference}\n\n${body}${atts}\n`;
 }
 
 // ------------------------------------------------------------------
@@ -102,9 +199,13 @@ async function writeMessage(msg) {
   await ensureArchiveDir();
   const filePath = getArchiveFilePath(channelId);
   const existing = await readFileIfExists(filePath);
-  if (existing?.includes(`## Message ${msg.id}`)) {
-    console.log(`⏭️ Duplicate skip ${msg.id}`); return;
+
+  // Use centralized pattern to check for duplicates
+  if (existing && MessagePatterns.containsMessage(existing, msg.id)) {
+    console.log(`⏭️ Duplicate skip ${msg.id}`);
+    return;
   }
+
   const header = existing ? '' : `# ${channelName}\n\nOriginal link: <https://discord.com/channels/${msg.guild.id}/${channelId}/${msg.id}>\n`;
   const formatted = await formatMessageMarkdown(msg);
   await fs.appendFile(filePath, header + formatted, 'utf8');
@@ -117,14 +218,20 @@ async function deleteMessage(channelId, messageId) {
   const filePath = getArchiveFilePath(channelId);
   const content = await readFileIfExists(filePath);
   if (!content) return;
-  // Match the entire message block: from ## Message ID until the next ## Message or end of file
-  const msgRegex = new RegExp(`(^|\\n)(## Message ${messageId}\\n(?:(?!\\n## Message ).)*?)(?=\\n## Message |$)`, 'gs');
-  if (!msgRegex.test(content)) { console.log(`⚠️  Message ${messageId} not found`); return; }
+
+  // Use centralized pattern to match message block
+  const msgRegex = MessagePatterns.messageBlockRegex(messageId);
+  if (!msgRegex.test(content)) {
+    console.log(`⚠️  Message ${messageId} not found`);
+    return;
+  }
+
   msgRegex.lastIndex = 0; // Reset after test
   const updated = content
-    .replace(msgRegex, '$1') // Keep only the leading newline/start
-    .replace(new RegExp(`in reply to \\[${messageId}\\]\\(#message-${messageId}\\)`, 'g'), `in reply to **DELETED MESSAGE** (${messageId})`)
+    .replace(msgRegex, '') // Remove the entire match (including leading newline captured in group 1)
+    .replace(MessagePatterns.replyReferenceRegex(messageId), MessagePatterns.deletedMessageReference(messageId))
     .replace(/\n+$/, '\n'); // Ensure file ends with single newline
+
   await fs.writeFile(filePath, updated, 'utf8');
   console.log(`🗑️  Removed message ${messageId} + updated references`);
 }
@@ -135,18 +242,30 @@ async function deleteMessage(channelId, messageId) {
 async function updateMessage(msg) {
   const filePath = getArchiveFilePath(msg.channel.id);
   const content = await readFileIfExists(filePath);
-  if (!content) { await writeMessage(msg); return; }
-  // Match the entire message block: from ## Message ID until the next ## Message or end of file
-  const regex = new RegExp(`(^|\\n)(## Message ${msg.id}\\n(?:(?!\\n## Message ).)*?)(?=\\n## Message |$)`, 'gs');
-  if (!regex.test(content)) { console.log(`➕ Adding message ${msg.id}`); await writeMessage(msg); return; }
+  if (!content) {
+    await writeMessage(msg);
+    return;
+  }
+
+  // Use centralized pattern to match message block
+  const regex = MessagePatterns.messageBlockRegex(msg.id);
+  if (!regex.test(content)) {
+    console.log(`➕ Adding message ${msg.id}`);
+    await writeMessage(msg);
+    return;
+  }
+
   if (!msg.editedAt) msg.editedAt = new Date();
   const formatted = await formatMessageMarkdown(msg);
+
   // Reset regex lastIndex after test
   regex.lastIndex = 0;
+
   // Replace, keeping the leading newline structure
   const replaced = content.replace(regex, (match, leadingNewline) => {
     return leadingNewline ? leadingNewline + formatted.trimStart() : formatted.trimStart();
   }).replace(/\n+$/, '\n'); // Ensure file ends with single newline
+
   await fs.writeFile(filePath, replaced, 'utf8');
   console.log(`✏️  Updated message ${msg.id}`);
 }
