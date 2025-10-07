@@ -8,7 +8,10 @@ import path from "path";
 
 // -------------------- CONFIGURATION --------------------
 const API_TOKEN = process.env.API_TOKEN; // keep secret!
-const CHANNEL_ID = process.argv[2] || process.env.CHANNEL_ID; // from CLI arg or env var or exit
+const CHANNEL_IDS_INPUT = process.argv[2] || process.env.CHANNEL_IDS; // from CLI arg or env var
+const CHANNEL_IDS = CHANNEL_IDS_INPUT
+  ? CHANNEL_IDS_INPUT.split(',').map(id => id.trim()).filter(Boolean)
+  : [];
 const MAX_FETCH_SIZE = Number(process.env.MAX_FETCH_SIZE) || 100; // max allowed by Discord API
 const OUTPUT_ROOT = process.env.OUTPUT_ROOT || "./data/archive"; // where markdown lands
 const CHECKPOINT_PATH = process.env.CHECKPOINT_PATH || "./data/checkpoints.json"; // tiny JSON file
@@ -23,10 +26,10 @@ if (!API_TOKEN) {
   process.exit(1);
 }
 
-if (!CHANNEL_ID) {
-  console.error("❌ Please provide a CHANNEL_ID either via:");
-  console.error("   • Command line argument: node discord-archiver.js <your_channel_id>");
-  console.error("   • Environment variable: CHANNEL_ID=your_channel_id");
+if (!CHANNEL_IDS.length) {
+  console.error("❌ Please provide channel IDs either via:");
+  console.error("   • Command line argument: node discord-archiver.js <channel_id1,channel_id2,...>");
+  console.error("   • Environment variable: CHANNEL_IDS=channel_id1,channel_id2,...");
   process.exit(1);
 }
 
@@ -84,11 +87,11 @@ async function formatMessageMarkdown(msg) {
 }
 
 // ------------------------------------------------------------------
-// Check if message is in target channel/thread
+// Check if message is in target channel or a target thread with specific tag
 // ------------------------------------------------------------------
 const isTargetMessage = msg =>
-  msg.channel.id === CHANNEL_ID ||
-  (msg.channel.isThread?.() && msg.channel.parent?.id === CHANNEL_ID && hasMatchingTag(msg.channel));
+  CHANNEL_IDS.includes(msg.channel.id) ||
+  (msg.channel.isThread?.() && msg.channel.parent?.id && CHANNEL_IDS.includes(msg.channel.parent.id) && hasMatchingTag(msg.channel));
 
 // ------------------------------------------------------------------
 // Write or append a message to the archive file
@@ -226,18 +229,37 @@ const client = new Client({
 
 client.once("clientReady", async () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
+  console.log(`📋 Monitoring ${CHANNEL_IDS.length} channel(s): ${CHANNEL_IDS.join(', ')}`);
 
-  const channel = await client.channels.fetch(CHANNEL_ID);
-  if (!channel || (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildForum)) {
-    console.error("❌ Target channel not found or not a text/forum channel.");
+  // Fetch and validate all channels
+  const channels = [];
+  for (const channelId of CHANNEL_IDS) {
+    try {
+      const channel = await client.channels.fetch(channelId);
+      if (!channel || (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildForum)) {
+        console.error(`⚠️  Channel ${channelId} not found or not a text/forum channel. Skipping.`);
+        continue;
+      }
+      channels.push(channel);
+      console.log(`✅ Channel "${channel.name}" (${channelId}) added`);
+    } catch (error) {
+      console.error(`❌ Failed to fetch channel ${channelId}:`, error.message);
+    }
+  }
+
+  if (channels.length === 0) {
+    console.error("❌ No valid channels found. Exiting.");
     process.exit(1);
   }
 
-  // Run the one‑time back‑fill (skipping anything already saved)
-  await bulkExport(channel);
+  // Run the one‑time back‑fill for all channels
+  for (const channel of channels) {
+    console.log(`\n🔍 Processing channel "${channel.name}" (${channel.id})`);
+    await bulkExport(channel);
+  }
 
   // Listen for messageCreate, messageUpdate, messageDelete, and threadUpdate
-  console.log("👂 Listening for new messages…");
+  console.log("\n👂 Listening for new messages…");
 });
 
 client.on("messageCreate", async (msg) => {
@@ -275,8 +297,8 @@ client.on("messageDelete", async (msg) => {
 });
 
 client.on("threadUpdate", async (oldThread, newThread) => {
-  // Only care about threads in the target forum channel
-  if (newThread.parent?.id !== CHANNEL_ID) return;
+  // Only care about threads in the target forum channels
+  if (!newThread.parent?.id || !CHANNEL_IDS.includes(newThread.parent.id)) return;
   // Check if tags changed
   const oldTags = oldThread.appliedTags || [];
   const newTags = newThread.appliedTags || [];
