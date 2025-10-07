@@ -70,7 +70,7 @@ async function formatMessageMarkdown(msg) {
     try {
       const c = await msg.client.channels.fetch(msg.reference.channelId);
       if (c) await c.messages.fetch(refId);
-      reference = `\nin reply to [${refId}](#${refId})`;
+      reference = `\nin reply to [${refId}](#message-${refId})`;
     } catch {
       reference = `\nin reply to **DELETED MESSAGE** (${refId})`;
     }
@@ -78,9 +78,9 @@ async function formatMessageMarkdown(msg) {
 
   const body = (msg.content || '').replace(/`/g, "`\u200b");
   const atts = msg.attachments.size
-    ? `\n**Attachments:**\n${[...msg.attachments.values()].map(a => `- [${a.name}](${a.url})`).join('\n')}`
+    ? `\n\n**Attachments:**\n\n${[...msg.attachments.values()].map(a => `- [${a.name}](${a.url})`).join('\n')}`
     : '';
-  return `### Message ${msg.id}\nby ${author}\nat *${ts}*${edited}${reference}\n\n${body}\n${atts}\n---\n\n`;
+  return `\n## Message ${msg.id}\n\nby ${author}\nat *${ts}*${edited}${reference}\n\n${body}${atts}\n`;
 }
 
 // ------------------------------------------------------------------
@@ -99,10 +99,10 @@ async function writeMessage(msg) {
   await ensureArchiveDir();
   const filePath = getArchiveFilePath(channelId);
   const existing = await readFileIfExists(filePath);
-  if (existing?.includes(`### Message ${msg.id}`)) {
+  if (existing?.includes(`## Message ${msg.id}`)) {
     console.log(`⏭️ Duplicate skip ${msg.id}`); return;
   }
-  const header = existing ? '' : `# ${channelName}\n\n`;
+  const header = existing ? '' : `# ${channelName}\n\nOriginal link: <https://discord.com/channels/${msg.guild.id}/${channelId}/${msg.id}>\n`;
   const formatted = await formatMessageMarkdown(msg);
   await fs.appendFile(filePath, header + formatted, 'utf8');
 }
@@ -114,11 +114,14 @@ async function deleteMessage(channelId, messageId) {
   const filePath = getArchiveFilePath(channelId);
   const content = await readFileIfExists(filePath);
   if (!content) return;
-  const msgRegex = new RegExp(`### Message ${messageId}\\n[\\s\\S]*?\\n---\\n\\n`, 'g');
+  // Match the entire message block: from ## Message ID until the next ## Message or end of file
+  const msgRegex = new RegExp(`(^|\\n)(## Message ${messageId}\\n(?:(?!\\n## Message ).)*?)(?=\\n## Message |$)`, 'gs');
   if (!msgRegex.test(content)) { console.log(`⚠️  Message ${messageId} not found`); return; }
+  msgRegex.lastIndex = 0; // Reset after test
   const updated = content
-    .replace(msgRegex, '')
-    .replace(new RegExp(`in reply to \\[${messageId}\\]\\(#${messageId}\\)`, 'g'), `in reply to **DELETED MESSAGE** (${messageId})`);
+    .replace(msgRegex, '$1') // Keep only the leading newline/start
+    .replace(new RegExp(`in reply to \\[${messageId}\\]\\(#message-${messageId}\\)`, 'g'), `in reply to **DELETED MESSAGE** (${messageId})`)
+    .replace(/\n+$/, '\n'); // Ensure file ends with single newline
   await fs.writeFile(filePath, updated, 'utf8');
   console.log(`🗑️  Removed message ${messageId} + updated references`);
 }
@@ -130,11 +133,17 @@ async function updateMessage(msg) {
   const filePath = getArchiveFilePath(msg.channel.id);
   const content = await readFileIfExists(filePath);
   if (!content) { await writeMessage(msg); return; }
-  const regex = new RegExp(`(### Message ${msg.id}\\n)([\\s\\S]*?)(\\n---\\n)`, 'm');
+  // Match the entire message block: from ## Message ID until the next ## Message or end of file
+  const regex = new RegExp(`(^|\\n)(## Message ${msg.id}\\n(?:(?!\\n## Message ).)*?)(?=\\n## Message |$)`, 'gs');
   if (!regex.test(content)) { console.log(`➕ Adding message ${msg.id}`); await writeMessage(msg); return; }
   if (!msg.editedAt) msg.editedAt = new Date();
   const formatted = await formatMessageMarkdown(msg);
-  const replaced = content.replace(regex, formatted);
+  // Reset regex lastIndex after test
+  regex.lastIndex = 0;
+  // Replace, keeping the leading newline structure
+  const replaced = content.replace(regex, (match, leadingNewline) => {
+    return leadingNewline ? leadingNewline + formatted.trimStart() : formatted.trimStart();
+  }).replace(/\n+$/, '\n'); // Ensure file ends with single newline
   await fs.writeFile(filePath, replaced, 'utf8');
   console.log(`✏️  Updated message ${msg.id}`);
 }
