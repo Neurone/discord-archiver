@@ -163,25 +163,25 @@ const MessagePatterns = {
 // ------------------------------------------------------------------
 async function resolveUserMentions(content, msg) {
   if (!content || !content.includes('<@')) return content;
-  
+
   // Find all user mentions <@userId> or <@!userId>
   const mentionPattern = /<@!?(\d+)>/g;
   const mentions = [...content.matchAll(mentionPattern)];
-  
+
   let result = content;
   for (const match of mentions) {
     const userId = match[1];
     const mentionText = match[0];
-    
+
     try {
       // Try to get user from message mentions first (cached)
       let user = msg.mentions.users.get(userId);
-      
+
       // If not in mentions, try to fetch from client
       if (!user) {
         user = await msg.client.users.fetch(userId);
       }
-      
+
       if (user) {
         // Try to get member to access display name (server nickname)
         // Use globalName (new Discord display name) or displayName from member, or fall back to username
@@ -192,7 +192,7 @@ async function resolveUserMentions(content, msg) {
         } catch {
           // If we can't get member info, use globalName or username
         }
-        
+
         const fullMention = `@${displayName} (${user.username}#${user.discriminator} ${userId})`;
         result = result.replace(mentionText, fullMention);
       }
@@ -202,7 +202,7 @@ async function resolveUserMentions(content, msg) {
       result = result.replace(mentionText, `@Unknown-User(${userId})`);
     }
   }
-  
+
   return result;
 }
 
@@ -219,7 +219,7 @@ async function formatMessageMarkdown(msg) {
   } catch {
     // If we can't get member info, use globalName or username
   }
-  
+
   const author = MessageFormat.metadata.author(
     displayName,
     msg.author.username,
@@ -247,10 +247,10 @@ async function formatMessageMarkdown(msg) {
 
   // Sanitize and wrap content in code block to prevent markdown injection
   let rawContent = msg.content || '';
-  
+
   // Resolve user mentions before sanitizing
   rawContent = await resolveUserMentions(rawContent, msg);
-  
+
   const { fence, content } = MessageFormat.codeBlock.sanitize(rawContent);
   const body = content ? `${fence}${MessageFormat.codeBlock.language}\n${content}\n${fence}` : '';
 
@@ -288,7 +288,7 @@ async function writeMessage(msg) {
     return;
   }
 
-  const header = existing ? '' : `# ${channelName}\n\nOriginal link: <https://discord.com/channels/${msg.guild.id}/${channelId}/${msg.id}>\n`;
+  const header = existing ? '' : `# ${channelName}\n\nOriginal conversation link: <https://discord.com/channels/${msg.guild.id}/${channelId}/${msg.id}>\n`;
   const formatted = await formatMessageMarkdown(msg);
   await fs.appendFile(filePath, header + formatted, 'utf8');
 }
