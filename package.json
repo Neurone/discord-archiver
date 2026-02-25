@@ -12,7 +12,10 @@
     "clean": "rm data/archive/*.md; rm data/checkpoints.json"
   },
   "dependencies": {
-    "@dotenvx/dotenvx": "github:dotenvx/dotenvx",
-    "discord.js": "^14.22.1"
+    "@dotenvx/dotenvx": "^1.52.0",
+    "discord.js": "^14.25.1"
+  },
+  "overrides": {
+    "undici": "6.23.0"
   }
 }

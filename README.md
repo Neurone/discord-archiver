@@ -26,7 +26,7 @@ Archives are saved as Markdown files in the `data/archive/` directory.
 - User mention resolution: Converts `<@userId>` to readable format like `@DisplayName (username#discriminator userId)`
 - Markdown injection protection: Message content wrapped in code blocks with automatic fence length detection
 - Preserves reply context; replies to already-deleted messages are marked during both bulk export and live mode
-- Attachment links preserved (filename + direct URL)
+- Attachment downloaded and preserved as URLs in the markdown
 - Safe filename handling (sanitized channel/thread IDs)
 - Stateless operation besides a lightweight JSON checkpoints file
 
@@ -35,7 +35,7 @@ Archives are saved as Markdown files in the `data/archive/` directory.
 Set via `npx dotenvx set <NAME> <VALUE>` or your preferred method.
 
 | Variable | Required | Description |
-|----------|----------|-------------|
+| ---------- | ---------- | ------------- |
 | `API_TOKEN` | Yes | Discord bot token (with Message Content intent enabled) |
 | `CHANNEL_IDS` | Yes (unless passed as CLI arg) | Comma-separated list of channel IDs (text or forum) to archive |
 | `FILTER_TAGS` | No | Comma-separated list of forum tag names to include (case-insensitive, substring match) |
@@ -70,7 +70,7 @@ User mentions like @OtherUser (other#0 222222222222222222) are automatically res
 
 **Attachments:**
 
-- [image.png](https://cdn.discordapp.com/attachments/…/image.png)
+- [image.png](1234567890123456789/33333333333333_image.png)
 ````
 
 Notes:
@@ -153,9 +153,8 @@ During runtime:
 
 ## Limitations / Future Ideas
 
-- No pagination backwards beyond the first startup snapshot when no checkpoint exists (could add full historical crawl).
 - No preservation of previous edit revisions (could add versioned collapsible blocks).
-- No rich embed capture; only message `content` and attachment URLs.
+- No rich embed capture; only message `content` and attachments are downloaded.
 - Does not currently export reactions or pin status.
 
 ## Setup Details
@@ -185,6 +184,8 @@ The archiver will:
 
 - Download all existing messages from the specified channel(s)
 - Save them as Markdown files in `data/archive/`
+- Download all the attachments and include their URLs in the markdown
+- Save the last processed message ID in `checkpoints.json` for incremental updates
 - Continue listening for new messages
 - Update the archives in real-time
 
@@ -201,7 +202,7 @@ This removes all markdown files and the checkpoint JSON—subsequent runs will r
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
-|---------|-------|-----|
+| --------- | ------- | ----- |
 | Script exits immediately | Missing `API_TOKEN` or `CHANNEL_ID` | Set env vars or pass channel ID CLI arg |
 | No edits detected | Missing `Partials.Message` or permissions | Ensure current code & bot has Message Content intent |
 | Replies show raw IDs only | Parent message not yet archived | Will update when parent appears (if still exists) |
