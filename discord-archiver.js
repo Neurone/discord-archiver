@@ -368,12 +368,27 @@ function hasMatchingTag(thread) {
 // Get all threads from a forum channel
 // ------------------------------------------------------------------
 async function getAllThreads(channel) {
-  const threads = [
-    ...(await channel.threads.fetchActive()).threads.values(),
-    ...(await channel.threads.fetchArchived()).threads.values(),
-  ];
-  const list = [...threads].filter(t => hasMatchingTag(t));
-  console.log(`📚 Threads: ${list.length}/${[...threads].length} match in "${channel.name || channel.id}"`);
+  // fetchActive returns all active threads in one call (no pagination needed)
+  const activeResult = await channel.threads.fetchActive();
+  const allThreads = [...activeResult.threads.values()];
+
+  // fetchArchived is paginated – loop until hasMore is false
+  let before = undefined;
+  let page = 0;
+  while (true) {
+    const result = await channel.threads.fetchArchived({ limit: 100, ...(before && { before }) });
+    const fetched = [...result.threads.values()];
+    allThreads.push(...fetched);
+    page++;
+    console.log(`📄 Archived page ${page}: fetched ${fetched.length} threads (hasMore=${result.hasMore})`);
+    if (!result.hasMore || fetched.length === 0) break;
+    // Use the archiveTimestamp of the last (oldest) thread as the cursor
+    const last = fetched[fetched.length - 1];
+    before = last.archiveTimestamp ?? last.id;
+  }
+
+  const list = allThreads.filter(t => hasMatchingTag(t));
+  console.log(`📚 Threads: ${list.length}/${allThreads.length} match in "${channel.name || channel.id}"`);
   if (FILTER_TAGS.length) console.log(`🏷️ Tags filter: ${FILTER_TAGS.join(', ')}`);
   return list;
 }
