@@ -36,9 +36,34 @@ if (!CHANNEL_IDS.length) {
 // -------------------- Small utilities ----------------------------
 const safeId = v => String(v).replace(/[^a-zA-Z0-9_-]/g, '');
 const getArchiveFilePath = channelId => path.join(OUTPUT_ROOT, `${safeId(channelId)}.md`);
+const getResourcesDir = channelId => path.join(OUTPUT_ROOT, safeId(channelId));
 const ensureArchiveDir = () => fs.mkdir(OUTPUT_ROOT, { recursive: true });
 const formatTimestamp = d => d.toISOString().replace('T', ' ').replace('Z', ' UTC');
 const readFileIfExists = async file => { try { return await fs.readFile(file, 'utf8'); } catch { return null; } };
+
+// ------------------------------------------------------------------
+// Download an attachment from Discord CDN to a local resources folder.
+// Returns the relative path (from OUTPUT_ROOT) to use in markdown,
+// or null if the download fails (caller should fall back to CDN URL).
+// ------------------------------------------------------------------
+async function downloadAttachment(url, channelId, attachmentId, filename) {
+  const resourcesDir = getResourcesDir(channelId);
+  await fs.mkdir(resourcesDir, { recursive: true });
+  // Prefix with attachment ID to avoid collisions (attachment IDs are globally unique)
+  const safeName = `${safeId(attachmentId)}_${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+  const destPath = path.join(resourcesDir, safeName);
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buf = await res.arrayBuffer();
+    await fs.writeFile(destPath, Buffer.from(buf));
+    // Relative path from the .md file (which sits in OUTPUT_ROOT)
+    return `${safeId(channelId)}/${safeName}`;
+  } catch (err) {
+    console.warn(`⚠️  Failed to download attachment ${filename}: ${err.message}`);
+    return null;
+  }
+}
 
 // ------------------------------------------------------------------
 // Load / save checkpoint per channel/thread
@@ -254,15 +279,21 @@ async function formatMessageMarkdown(msg) {
   const { fence, content } = MessageFormat.codeBlock.sanitize(rawContent);
   const body = content ? `${fence}${MessageFormat.codeBlock.language}\n${content}\n${fence}` : '';
 
-  // Format attachments using MessageFormat
-  const atts = msg.attachments.size
-    ? `\n\n${MessageFormat.attachments.header}\n\n${[...msg.attachments.values()]
-      .map(a => MessageFormat.attachments.item(a.name, a.url))
-      .join('\n')}`
-    : '';
+  // Download attachments to local resources folder and reference locally
+  let atts = '';
+  if (msg.attachments.size) {
+    const lines = await Promise.all(
+      [...msg.attachments.values()].map(async (a) => {
+        const localPath = await downloadAttachment(a.url, msg.channel.id, a.id, a.name);
+        const ref = localPath ?? a.url; // fall back to CDN if download failed
+        return MessageFormat.attachments.item(a.name, ref);
+      })
+    );
+    atts = `\n\n${MessageFormat.attachments.header}\n\n${lines.join('\n')}`;
+  }
 
   // Use MessageFormat for the section marker
-  return `\n${MessageFormat.sectionMarker(msg.id)}\n\n${author}\n${ts}${edited}${reference}\n\n${body}${atts}\n`;
+  return `\n${MessageFormat.sectionMarker(msg.id)}\n\n${author}\n${ts}${edited}${reference}${body ? `\n\n${body}` : ''}${atts}\n`;
 }
 
 // ------------------------------------------------------------------
